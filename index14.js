@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, EmbedBuilder, AttachmentBuilder } = require('discord.js');
+const setupCountUnverifiedCommand = require('./countUnverified');
 const { setupExtractCommands } = require('./unverified');
 const { setupPurgeCommands } = require('./purge');
 const fs = require('fs');
@@ -179,13 +180,28 @@ client.once('ready', () => {
 
 setupExtractCommands(client, { allowedChannels, allowedRoles, verifiedRoleId, debugLog });
 setupPurgeCommands(client, { allowedChannels, allowedRoles, verifiedRoleId, debugLog });
+setupCountUnverifiedCommand(client, { allowedChannels, allowedRoles, verifiedRoleId, debugLog });
 
 client.on('messageCreate', async message => {
+    // First check if it starts with !count
     if (!message.content.startsWith('!count')) return;
+    
+    // Get the full command
+    const fullCommand = message.content.trim();
+    
+    // List of valid commands
+    const validCommands = ['!count', '!count export', '!count unverified'];
+    
+    // If it's not a valid command, ignore it
+    if (!validCommands.includes(fullCommand)) {
+        debugLog('Invalid count command received:', fullCommand);
+        return;
+    }
     
     debugLog('Count command received', {
         channel: message.channel.id,
-        user: message.author.tag
+        user: message.author.tag,
+        command: fullCommand
     });
 
     // Check channel permission
@@ -202,7 +218,7 @@ client.on('messageCreate', async message => {
     }
 
     // Handle export command
-    if (message.content.trim() === '!count export') {
+    if (fullCommand === '!count export') {
         try {
             await message.channel.send('Generating CSV export... This might take a few moments.');
             
@@ -254,6 +270,7 @@ client.on('messageCreate', async message => {
         }
     }
 
+    // If not export command, must be !count or !count unverified
     try {
         const guild = message.guild;
         await guild.members.fetch();
@@ -266,6 +283,12 @@ client.on('messageCreate', async message => {
         ).size;
         const unverifiedPercentage = ((unverifiedMembers / totalMembers) * 100).toFixed(1);
 
+        if (fullCommand === '!count unverified') {
+            // Don't do anything here as it's handled by the countUnverifiedCommand module
+            return;
+        }
+
+        // Regular !count command
         const embed = new EmbedBuilder()
             .setTitle(`Total members: ${totalMembers}`)
             .setDescription(`Unverified members: ${unverifiedMembers} (${unverifiedPercentage}%)`)
@@ -304,7 +327,7 @@ client.on('messageCreate', async message => {
             embed.addFields({ name: role.name, value: `${count} (${percentage}%)`, inline: true });
         }
 
-        // Verify counts
+        // Verify counts in debug mode
         if (DEBUG_MODE) {
             debugLog('\n=== Final Count Verification ===');
             debugLog(`Total members: ${totalMembers}`);
@@ -312,7 +335,6 @@ client.on('messageCreate', async message => {
             debugLog(`Counted unique members: ${globalCountedMembers.size}`);
             debugLog(`Unaccounted verified members: ${totalMembers - unverifiedMembers - globalCountedMembers.size}`);
 
-            // List unaccounted verified members
             const unaccountedMembers = guild.members.cache
                 .filter(m => 
                     m.roles.cache.has(verifiedRoleId) && 

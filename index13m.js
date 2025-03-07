@@ -1,18 +1,42 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, AttachmentBuilder } = require('discord.js');
-const setupCountUnverifiedCommand = require('./countUnverified');
+const { Client, GatewayIntentBits, Partials, EmbedBuilder } = require('discord.js');
 const { setupExtractCommands } = require('./unverified');
 const { setupPurgeCommands } = require('./purge');
-const fs = require('fs');
-const path = require('path');
-const { getUserMessageCount } = require('./export'); // Import the proper message counting function
 
 // Debug mode and logging
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
 
-// Helper function to get formatted timestamp in UTC
+// Helper function to get formatted timestamp in UTC (for logging)
 function getTimestamp() {
     return new Date().toISOString().replace('T', ' ').substring(0, 19);
+}
+
+// Helper function for formatted timestamp in embeds
+function getFormattedTimestamp() {
+    const now = new Date();
+    const hours = now.getHours().toString().padStart(2, '0');
+    const minutes = now.getMinutes().toString().padStart(2, '0');
+    
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    // Array of short month names
+    const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    
+    if (now.toDateString() === today.toDateString()) {
+        return `Today at ${hours}:${minutes}`;
+    } else if (now.toDateString() === yesterday.toDateString()) {
+        return `Yesterday at ${hours}:${minutes}`;
+    } else {
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = months[now.getMonth()];
+        const year = now.getFullYear();
+        return `${day} ${month} ${year} ${hours}:${minutes}`;
+    }
 }
 
 // Custom logging function
@@ -52,14 +76,6 @@ const scheduledRoles = Array.from({ length: 6 }, (_, i) => process.env[`SCHEDULE
 const scheduledChannels = Array.from({ length: 6 }, (_, i) => process.env[`SCHEDULED_CHANNEL_${i + 1}`]).filter(Boolean);
 const scheduledChannelNames = Array.from({ length: 6 }, (_, i) => process.env[`SCHEDULED_CHANNEL_NAME_${i + 1}`]).filter(Boolean);
 const countRoles = Array.from({ length: 6 }, (_, i) => process.env[`COUNT_ROLE_${i + 1}`]).filter(Boolean);
-
-// Message cache for tracking user messages (last 24 hours)
-const messageCache = new Map();
-
-// Clear message cache every 24 hours
-setInterval(() => {
-    messageCache.clear();
-}, 24 * 60 * 60 * 1000);
 
 function countMembersWithHighestRole(members, roleId, verifiedRoleId, countedMembers = new Set()) {
     let count = 0;
@@ -164,15 +180,6 @@ function scheduleUpdates() {
     setInterval(updateChannelNames, intervalMs);
 }
 
-// Track messages for counting
-client.on('messageCreate', message => {
-    if (message.author.bot) return;
-    
-    const userId = message.author.id;
-    const currentCount = messageCache.get(userId) || 0;
-    messageCache.set(userId, currentCount + 1);
-});
-
 client.once('ready', () => {
     debugLog('Bot is ready!');
     debugLog(`Start time: ${getTimestamp()}`);
@@ -181,28 +188,13 @@ client.once('ready', () => {
 
 setupExtractCommands(client, { allowedChannels, allowedRoles, verifiedRoleId, debugLog });
 setupPurgeCommands(client, { allowedChannels, allowedRoles, verifiedRoleId, debugLog });
-setupCountUnverifiedCommand(client, { allowedChannels, allowedRoles, verifiedRoleId, debugLog });
 
 client.on('messageCreate', async message => {
-    // First check if it starts with !count
     if (!message.content.startsWith('!count')) return;
-    
-    // Get the full command
-    const fullCommand = message.content.trim();
-    
-    // List of valid commands
-    const validCommands = ['!count', '!count export', '!count unverified'];
-    
-    // If it's not a valid command, ignore it
-    if (!validCommands.includes(fullCommand)) {
-        debugLog('Invalid count command received:', fullCommand);
-        return;
-    }
     
     debugLog('Count command received', {
         channel: message.channel.id,
-        user: message.author.tag,
-        command: fullCommand
+        user: message.author.tag
     });
 
     // Check channel permission
@@ -218,83 +210,6 @@ client.on('messageCreate', async message => {
         return;
     }
 
-    // Handle export command
-    if (fullCommand === '!count export') {
-        try {
-            await message.channel.send('Generating CSV export... This might take a few moments. Message counts will be calculated based on channel history, which may take time.');
-            
-            const guild = message.guild;
-            await guild.members.fetch();
-            
-            // Prepare CSV header
-            const csvHeader = 'UserID,Username,Highest Role,Server Join Date,Discord Join Date,Messages Number\n';
-            let csvContent = csvHeader;
-            
-            // Initialize progress counter
-            let processed = 0;
-            const totalMembers = guild.members.cache.filter(member => !member.user.bot).size;
-            const statusMessage = await message.channel.send(`Processing: 0/${totalMembers} members (0%)`);
-            
-            // Create temporary file
-            const tempFilePath = path.join(__dirname, 'user_export.csv');
-            
-            // Process each member
-            for (const [id, member] of guild.members.cache) {
-                if (member.user.bot) continue;  // Skip bots
-                
-                const userId = member.user.id;
-                const username = member.user.tag.replace(/,/g, '');  // Remove commas to avoid CSV issues
-                const highestRole = member.roles.highest.name.replace(/,/g, '');
-                const serverJoinDate = member.joinedAt.toISOString().slice(0, 19).replace('T', ' ');
-                const discordJoinDate = member.user.createdAt.toISOString().slice(0, 19).replace('T', ' ');
-                
-                // Use the proper message counting function
-                let messagesNumber = 0;
-                try {
-                    messagesNumber = await getUserMessageCount(guild, userId);
-                } catch (error) {
-                    debugLog(`Error counting messages for ${username}:`, error);
-                }
-                
-                // Add line to CSV
-                csvContent += `${userId},"${username}","${highestRole}","${serverJoinDate}","${discordJoinDate}",${messagesNumber}\n`;
-                
-                // Update progress
-                processed++;
-                if (processed % 5 === 0 || processed === totalMembers) {
-                    const percentage = Math.floor((processed / totalMembers) * 100);
-                    await statusMessage.edit(`Processing: ${processed}/${totalMembers} members (${percentage}%)`);
-                }
-                
-                // Periodically write to file to save memory
-                if (processed % 50 === 0 || processed === totalMembers) {
-                    fs.writeFileSync(tempFilePath, csvContent, 'utf8');
-                }
-            }
-            
-            // Create attachment and send file
-            const attachment = new AttachmentBuilder(tempFilePath, {
-                name: `user_export_${getTimestamp().replace(/[: ]/g, '-')}.csv`
-            });
-            
-            await message.channel.send({
-                content: 'Here is your requested user export with actual message counts:',
-                files: [attachment]
-            });
-            
-            // Clean up temporary file
-            fs.unlinkSync(tempFilePath);
-            
-            debugLog('Export command completed successfully');
-            return;
-        } catch (error) {
-            debugLog('Error in export command:', error);
-            await message.channel.send('An error occurred while generating the export.');
-            return;
-        }
-    }
-
-    // If not export command, must be !count or !count unverified
     try {
         const guild = message.guild;
         await guild.members.fetch();
@@ -307,12 +222,6 @@ client.on('messageCreate', async message => {
         ).size;
         const unverifiedPercentage = ((unverifiedMembers / totalMembers) * 100).toFixed(1);
 
-        if (fullCommand === '!count unverified') {
-            // Don't do anything here as it's handled by the countUnverifiedCommand module
-            return;
-        }
-
-        // Regular !count command
         const embed = new EmbedBuilder()
             .setTitle(`Total members: ${totalMembers}`)
             .setDescription('Members with highest roles:')
@@ -379,7 +288,14 @@ client.on('messageCreate', async message => {
             });
         }
 
-                // Verify counts in debug mode
+        // Add unverified members as the last field
+        embed.addFields({ 
+            name: 'Unverified Members', 
+            value: `${unverifiedMembers} (${unverifiedPercentage}%)`, 
+            inline: false 
+        });
+
+        // Verify counts
         if (DEBUG_MODE) {
             debugLog('\n=== Final Count Verification ===');
             debugLog(`Total members: ${totalMembers}`);
@@ -387,6 +303,7 @@ client.on('messageCreate', async message => {
             debugLog(`Counted unique members: ${globalCountedMembers.size}`);
             debugLog(`Unaccounted verified members: ${totalMembers - unverifiedMembers - globalCountedMembers.size}`);
 
+            // List unaccounted verified members
             const unaccountedMembers = guild.members.cache
                 .filter(m => 
                     m.roles.cache.has(verifiedRoleId) && 

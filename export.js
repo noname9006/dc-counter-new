@@ -18,6 +18,7 @@ class ExportProgress {
         this.startTime = Date.now();
         this.lastUpdateTime = Date.now();
         this.saveFile = path.join(process.cwd(), `export_progress_${guildId}.json`);
+        this.totalMessagesFetched = 0;
     }
 
     async save() {
@@ -25,7 +26,8 @@ class ExportProgress {
             processedUsers: Array.from(this.processedUsers),
             currentBatch: this.currentBatch,
             startTime: this.startTime,
-            lastUpdateTime: Date.now()
+            lastUpdateTime: Date.now(),
+            totalMessagesFetched: this.totalMessagesFetched
         };
         try {
             await fs.writeFile(this.saveFile, JSON.stringify(data, null, 2));
@@ -42,6 +44,7 @@ class ExportProgress {
             this.currentBatch = data.currentBatch;
             this.startTime = data.startTime;
             this.lastUpdateTime = data.lastUpdateTime || Date.now();
+            this.totalMessagesFetched = data.totalMessagesFetched || 0;
             debugLog(`Progress loaded: ${this.processedUsers.size} users previously processed`);
             return true;
         } catch (e) {
@@ -58,9 +61,14 @@ class ExportProgress {
             // Ignore if file doesn't exist
         }
     }
+
+    updateTotalMessagesFetched(count) {
+        this.totalMessagesFetched += count;
+        process.stdout.write(`\rTotal messages fetched: ${this.totalMessagesFetched}`);
+    }
 }
 
-async function getUserMessageCount(guild, userId, channelCallback = null) {
+async function getUserMessageCount(guild, userId, progress) {
     let totalMessages = 0;
     const textChannels = guild.channels.cache.filter(
         channel => channel.type === 0 && channel.viewable
@@ -73,6 +81,8 @@ async function getUserMessageCount(guild, userId, channelCallback = null) {
             let lastMessageId = null;
             let channelMessages = 0;
             let keepFetching = true;
+
+            debugLog(`Fetching messages in channel ${channel.name} for user ${userId}`);
 
             while (keepFetching) {
                 await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
@@ -91,13 +101,11 @@ async function getUserMessageCount(guild, userId, channelCallback = null) {
 
                 if (messages.size < MESSAGE_BATCH_SIZE) break;
 
-                if (channelCallback) {
-                    channelCallback(channelId, channelMessages);
-                }
+                progress.updateTotalMessagesFetched(messages.size);
             }
 
             if (channelMessages > 0) {
-                debugLog(`Channel ${channel.name}: ${channelMessages} messages`);
+                debugLog(`Channel ${channel.name}: ${channelMessages} messages for user ${userId}`);
             }
 
         } catch (error) {
@@ -106,6 +114,7 @@ async function getUserMessageCount(guild, userId, channelCallback = null) {
         }
     }
 
+    debugLog(`Total messages for user ${userId}: ${totalMessages}`);
     return totalMessages;
 }
 
@@ -186,7 +195,7 @@ async function exportUserDataToCSV(guild, progressMessage) {
 
                 let messageCount = 0;
                 try {
-                    messageCount = await getUserMessageCount(guild, member.id);
+                    messageCount = await getUserMessageCount(guild, member.id, progress);
                 } catch (error) {
                     debugLog(`Error counting messages for ${member.user.tag}:`, error);
                 }
